@@ -1,9 +1,10 @@
 import pandas as pd
 import re
-from datetime import datetime
+import requests
+from io import BytesIO
 
 # ----------------------------------------------------------------------
-# 1. Name normalisation (same as in your script)
+# Name normalisation (same as your original script)
 # ----------------------------------------------------------------------
 CANONICAL = {
     "martin": "Martin", "martin lundy": "Martin",
@@ -31,7 +32,7 @@ def norm_name(n):
     return t
 
 # ----------------------------------------------------------------------
-# 2. Billing logic
+# Billing logic
 # ----------------------------------------------------------------------
 def is_invoiced_col(v):
     if not isinstance(v, str):
@@ -90,7 +91,7 @@ def smart_billing_status(invoiced, xero_inv, pay_status, comments, is_done, like
     return "📋 Invoiced – Unconfirmed"
 
 # ----------------------------------------------------------------------
-# 3. Stuck keyword detection
+# Stuck keyword detection
 # ----------------------------------------------------------------------
 STUCK_KW = ["pending", "waiting", "tbc", "confirm", "follow up",
             "chase", "delay", "hold", "not start", "approval"]
@@ -100,11 +101,23 @@ def is_stuck(task_name, comments):
     return any(k in combined for k in STUCK_KW)
 
 # ----------------------------------------------------------------------
-# 4. Main processing function
+# Main processing function
 # ----------------------------------------------------------------------
-def process_live_projects(file_path, sheet_name="LIVE PROJECTS"):
-    """Read the Excel file and return aggregated data structures."""
-    df = pd.read_excel(file_path, sheet_name=sheet_name, header=None)
+def process_live_projects(source, sheet_name="LIVE PROJECTS"):
+    """
+    source can be:
+    - a local file path (string)
+    - a URL (string starting with http)
+    - a file-like object (e.g., from st.file_uploader)
+    """
+    if isinstance(source, str) and source.startswith(('http://', 'https://')):
+        response = requests.get(source)
+        response.raise_for_status()
+        excel_data = BytesIO(response.content)
+        df = pd.read_excel(excel_data, sheet_name=sheet_name, header=None)
+    else:
+        # Assume it's a file path or file-like object
+        df = pd.read_excel(source, sheet_name=sheet_name, header=None)
 
     # Find header row (where first cell is "Ref No:" or similar)
     header_row = None
@@ -125,7 +138,6 @@ def process_live_projects(file_path, sheet_name="LIVE PROJECTS"):
         "col8", "Works Done", "Date Completed", "col11", "Invoiced", "Xero Inv",
         "Pay Status", "Comments"
     ]
-    # If there are more columns, we can add them later (e.g., start date, end date)
     if data_df.shape[1] >= 18:
         col_names.extend(["Start Date", "End Date"])
     data_df.columns = col_names[:data_df.shape[1]]
@@ -171,23 +183,18 @@ def process_live_projects(file_path, sheet_name="LIVE PROJECTS"):
         return None, None
     data_df["PD_done"], data_df["PD_total"] = zip(*data_df["Task"].apply(extract_pd))
 
-    # ------------------------------------------------------------------
     # Project-level aggregation
-    # ------------------------------------------------------------------
     projects = {}
     for ref, group in data_df.groupby("Ref"):
         tasks = group.to_dict(orient="records")
         client = group["Client"].iloc[0]
         region = group["Region"].iloc[0]
-        primary_lead = group["Lead"].iloc[0]  # first non-empty? We'll refine later
-        # PD totals
+        primary_lead = group["Lead"].iloc[0]
         pd_total = max([t["PD_total"] for t in tasks if t["PD_total"] is not None], default=0)
         pd_done = max([t["PD_done"] for t in tasks if t["PD_done"] is not None], default=0)
-        # Latest comment
         tasks_with_comments = [t for t in tasks if t["Comments"] and len(t["Comments"]) > 5]
         latest_comment = tasks_with_comments[-1]["Comments"] if tasks_with_comments else ""
         latest_task_name = tasks_with_comments[-1]["Task"] if tasks_with_comments else ""
-        # Aggregated counts
         total = len(tasks)
         done = sum(t["IsDone"] for t in tasks)
         stuck = sum(t["IsStuck"] for t in tasks)
@@ -196,20 +203,16 @@ def process_live_projects(file_path, sheet_name="LIVE PROJECTS"):
         invoiced = sum(1 for t in tasks if t["HasInvoice"])
         likely_paid = sum(1 for t in tasks if t["LikelyPaid"])
         paid = sum(1 for t in tasks if t["IsPaid"])
-        # Active leads/supports (from pending tasks)
         pending = [t for t in tasks if not t["IsDone"]]
         active_leads = list({t["Lead"] for t in pending if t["Lead"]})
         active_supports = list({t["Support"] for t in pending if t["Support"]})
-        # All Xero invoices
         xero_invs = list({t["Xero Inv"] for t in tasks if has_real_xero_invoice(t["Xero Inv"])})
-        # Progress %
         if pd_total > 0:
             progress = min(100, int(round(pd_done / pd_total * 100)))
         elif total > 0:
             progress = int(round(done / total * 100))
         else:
             progress = 0
-        # Status
         if total > 0 and (done > 0 or stuck > 0):
             if progress >= 100:
                 status = "Complete"
@@ -221,43 +224,25 @@ def process_live_projects(file_path, sheet_name="LIVE PROJECTS"):
                 status = "Not Started"
         else:
             status = "Admin"
-
-        # Get project dates (first start date, last end date)
         start_date = group["Start Date"].min() if not group["Start Date"].isna().all() else pd.NaT
         end_date = group["End Date"].max() if not group["End Date"].isna().all() else pd.NaT
-
         projects[ref] = {
-            "ref": ref,
-            "client": client,
-            "region": region,
-            "lead": primary_lead,
-            "total": total,
-            "done": done,
-            "stuck": stuck,
-            "pd_done": pd_done,
-            "pd_total": pd_total,
-            "progress": progress,
-            "status": status,
+            "ref": ref, "client": client, "region": region, "lead": primary_lead,
+            "total": total, "done": done, "stuck": stuck,
+            "pd_done": pd_done, "pd_total": pd_total, "progress": progress, "status": status,
             "aw_pay": awaiting_pay > 0,
-            "active_leads": ", ".join(active_leads),
-            "active_supports": ", ".join(active_supports),
-            "not_invoiced": not_invoiced,
-            "awaiting_pay_count": awaiting_pay,
-            "invoiced_count": invoiced,
-            "likely_paid_count": likely_paid,
-            "paid_count": paid,
+            "active_leads": ", ".join(active_leads), "active_supports": ", ".join(active_supports),
+            "not_invoiced": not_invoiced, "awaiting_pay_count": awaiting_pay,
+            "invoiced_count": invoiced, "likely_paid_count": likely_paid, "paid_count": paid,
             "latest_update": latest_comment or latest_task_name or "—",
             "latest_pay_status": tasks[-1]["Pay Status"] if tasks else "",
             "latest_xero_inv": tasks[-1]["Xero Inv"] if tasks else "",
             "all_xero_invs": ", ".join(xero_invs[:5]),
-            "start_date": start_date,
-            "end_date": end_date,
+            "start_date": start_date, "end_date": end_date,
             "tasks": tasks,
         }
 
-    # ------------------------------------------------------------------
     # Person stats
-    # ------------------------------------------------------------------
     person_stats = {}
     for t in data_df.to_dict(orient="records"):
         for role in ["Lead", "Support"]:
@@ -266,14 +251,8 @@ def process_live_projects(file_path, sheet_name="LIVE PROJECTS"):
                 continue
             if name not in person_stats:
                 person_stats[name] = {
-                    "name": name,
-                    "lead_projects": set(),
-                    "lead_done": 0,
-                    "lead_pending": 0,
-                    "active_set": [],
-                    "support_set": [],
-                    "stuck_count": 0,
-                    "await_count": 0,
+                    "name": name, "lead_projects": set(), "lead_done": 0, "lead_pending": 0,
+                    "active_set": [], "support_set": [], "stuck_count": 0, "await_count": 0,
                 }
             p = person_stats[name]
             if role == "Lead":
@@ -301,14 +280,11 @@ def process_live_projects(file_path, sheet_name="LIVE PROJECTS"):
                             p["active_set"].append({"ref": t["Ref"], "status": proj_status, "role": "Support"})
                         if t["Ref"] not in p["support_set"]:
                             p["support_set"].append(t["Ref"])
-
-    # Convert sets to counts etc.
     for name, p in person_stats.items():
         p["lead_project_count"] = len(p["lead_projects"])
         p["active_projects"] = len(p["active_set"])
         p["support_count"] = len(p["support_set"])
         p["completion_pct"] = round(p["lead_done"] / max(1, p["lead_project_count"]) * 100)
-        # Availability
         if p["lead_pending"] == 0:
             p["availability"] = "Available"
         elif p["lead_pending"] < 20:
@@ -318,9 +294,7 @@ def process_live_projects(file_path, sheet_name="LIVE PROJECTS"):
         else:
             p["availability"] = "Overloaded"
 
-    # ------------------------------------------------------------------
-    # Compute global KPIs
-    # ------------------------------------------------------------------
+    # Global KPIs
     all_tasks = data_df.to_dict(orient="records")
     total_projects = len(projects)
     complete_projects = sum(1 for p in projects.values() if p["status"] == "Complete")

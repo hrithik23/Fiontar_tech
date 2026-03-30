@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-import plotly.figure_factory as ff
+import plotly.express as px
 from dashboard_processor import process_live_projects
 import tempfile
 import os
@@ -10,7 +10,7 @@ import time
 # Configuration
 # -------------------------------
 SHEET_NAME = "LIVE PROJECTS"
-REFRESH_INTERVAL = 30  # seconds for auto-refresh (only if using URL)
+REFRESH_INTERVAL = 30  # seconds for auto-refresh (only when using URL)
 
 # Try to get the Excel URL from Streamlit secrets
 try:
@@ -46,13 +46,11 @@ def load_data_from_file(file_path):
 # Load data based on mode
 # -------------------------------
 if use_url:
-    # Auto-refresh mode: fetch from private URL
-    st.sidebar.success("Auto-refresh enabled – data is fetched from private URL every 30 seconds.")
+    st.sidebar.success("Auto‑refresh enabled – data is fetched from private URL every 30 seconds.")
     data = load_data_from_url()
     if data is None:
         st.stop()
 else:
-    # Manual upload mode
     uploaded_file = st.sidebar.file_uploader(
         "Upload LIVE PROJECTS.xlsx",
         type=["xlsx"],
@@ -61,12 +59,11 @@ else:
     if not uploaded_file:
         st.info("👈 Please upload your LIVE PROJECTS.xlsx file using the sidebar.")
         st.stop()
-    # Save to temp file
     with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
         tmp.write(uploaded_file.getvalue())
         tmp_path = tmp.name
     data = load_data_from_file(tmp_path)
-    os.unlink(tmp_path)  # clean up
+    os.unlink(tmp_path)
     if data is None:
         st.stop()
 
@@ -75,23 +72,27 @@ projects = data["projects"]
 person_stats = data["person_stats"]
 tasks = data["tasks"]
 kpis = data["kpis"]
+df_raw = data["dataframe"]
 
-# Sidebar filters (common to both modes)
+# Sidebar filters
 st.sidebar.title("Filters")
-all_people = sorted({t["Lead"] for t in tasks if t["Lead"]} | {t["Support"] for t in tasks if t["Support"]})
+all_people = sorted({t.get("Lead", "") for t in tasks if t.get("Lead")} |
+                    {t.get("Support", "") for t in tasks if t.get("Support")})
 person_filter = st.sidebar.selectbox("Filter by person", ["All"] + all_people)
-status_filter = st.sidebar.multiselect("Project status", ["Complete", "In Progress", "Blocked", "Not Started", "Admin"], default=["In Progress", "Blocked"])
+status_filter = st.sidebar.multiselect("Project status",
+                                       ["Complete", "In Progress", "Blocked", "Not Started", "Admin"],
+                                       default=["In Progress", "Blocked"])
 show_only_pending = st.sidebar.checkbox("Show only pending tasks")
 
 # Apply filters to tasks
 filtered_tasks = tasks.copy()
 if person_filter != "All":
-    filtered_tasks = [t for t in filtered_tasks if t["Lead"] == person_filter or t["Support"] == person_filter]
+    filtered_tasks = [t for t in filtered_tasks if t.get("Lead") == person_filter or t.get("Support") == person_filter]
 if show_only_pending:
-    filtered_tasks = [t for t in filtered_tasks if not t["IsDone"]]
+    filtered_tasks = [t for t in filtered_tasks if not t.get("IsDone", False)]
 
 # ----------------------------------------------------------------------
-# Helper styling functions
+# Helper styling functions (colours)
 # ----------------------------------------------------------------------
 def status_color(status):
     return {
@@ -137,7 +138,8 @@ with tab1:
         st.metric("Total Projects", kpis["total_projects"])
         st.metric("Active Projects", kpis["in_progress"] + kpis["blocked"])
     with col2:
-        st.metric("Tasks Completed", f"{kpis['done_tasks']}/{kpis['total_tasks']}", f"{kpis['done_tasks']/max(1,kpis['total_tasks']):.0%}")
+        st.metric("Tasks Completed", f"{kpis['done_tasks']}/{kpis['total_tasks']}",
+                  f"{kpis['done_tasks']/max(1,kpis['total_tasks']):.0%}")
         st.metric("Stuck Tasks", kpis["stuck_tasks"])
     with col3:
         st.metric("Paid Tasks", kpis["paid_tasks"])
@@ -146,14 +148,14 @@ with tab1:
         st.metric("Not Invoiced", kpis["not_invoiced_tasks"])
         st.metric("Likely Paid", kpis["likely_paid_tasks"])
 
-    st.subheader("Team Availability")
-    if person_stats:
-        team_df = pd.DataFrame(person_stats)
-        team_df["Availability"] = team_df["availability"]
-        team_df["Pending Projects"] = team_df["lead_pending"]
-        team_df["Active Projects"] = team_df["active_projects"]
-        st.dataframe(team_df[["name", "Availability", "Pending Projects", "Active Projects", "lead_done", "completion_pct"]],
-                     use_container_width=True)
+    with st.expander("Team Availability", expanded=True):
+        if person_stats:
+            team_df = pd.DataFrame(person_stats)
+            team_df["Availability"] = team_df["availability"]
+            team_df["Pending Projects"] = team_df["lead_pending"]
+            team_df["Active Projects"] = team_df["active_projects"]
+            st.dataframe(team_df[["name", "Availability", "Pending Projects", "Active Projects", "lead_done", "completion_pct"]],
+                         use_container_width=True)
 
 # -------------------- TAB 2: PROJECTS --------------------
 with tab2:
@@ -175,8 +177,9 @@ with tab3:
     if filtered_tasks:
         df_tasks = pd.DataFrame(filtered_tasks)
         cols = ["ref", "client", "task", "Lead", "Support", "IsDone", "SmartStatus", "IsStuck", "Comments"]
-        df_display = df_tasks[cols].copy()
-        df_display["IsDone"] = df_display["IsDone"].apply(lambda x: "✓ YES" if x else "NO")
+        df_display = df_tasks[[c for c in cols if c in df_tasks.columns]].copy()
+        if "IsDone" in df_display:
+            df_display["IsDone"] = df_display["IsDone"].apply(lambda x: "✓ YES" if x else "NO")
         st.dataframe(df_display, use_container_width=True)
     else:
         st.info("No tasks match the current filters.")
@@ -186,50 +189,56 @@ with tab4:
     st.header("Billing Intelligence")
     unpaid_projects = [p for p in projects if p["not_invoiced"] > 0 or p["awaiting_pay_count"] > 0 or p["likely_paid_count"] > 0]
     if unpaid_projects:
-        st.subheader("Clients with unpaid or pending billing")
-        df_unpaid = pd.DataFrame(unpaid_projects)
-        st.dataframe(df_unpaid[["client", "ref", "not_invoiced", "awaiting_pay_count", "likely_paid_count", "paid_count", "all_xero_invs"]],
-                     use_container_width=True)
+        with st.expander("Clients with unpaid or pending billing", expanded=True):
+            df_unpaid = pd.DataFrame(unpaid_projects)
+            st.dataframe(df_unpaid[["client", "ref", "not_invoiced", "awaiting_pay_count", "likely_paid_count", "paid_count", "all_xero_invs"]],
+                         use_container_width=True)
     else:
         st.success("All clients are fully paid and invoiced.")
 
-    bill_tasks = [t for t in tasks if (t["IsDone"] and not t["HasInvoice"] and not t["LikelyPaid"]) or t["AwaitingPayment"] or t["LikelyPaid"]]
+    bill_tasks = [t for t in tasks if (t.get("IsDone", False) and not t.get("HasInvoice", False) and not t.get("LikelyPaid", False)) or t.get("AwaitingPayment", False) or t.get("LikelyPaid", False)]
     if bill_tasks:
-        st.subheader("Tasks requiring billing action")
-        df_bill_tasks = pd.DataFrame(bill_tasks)
-        st.dataframe(df_bill_tasks[["ref", "client", "task", "SmartStatus", "Xero Inv", "Pay Status", "Comments"]],
-                     use_container_width=True)
+        with st.expander("Tasks requiring billing action", expanded=True):
+            df_bill_tasks = pd.DataFrame(bill_tasks)
+            st.dataframe(df_bill_tasks[["ref", "client", "task", "SmartStatus", "Xero Inv", "Pay Status", "Comments"]],
+                         use_container_width=True)
 
 # -------------------- TAB 5: TIMELINE --------------------
 with tab5:
     st.header("Project Timeline")
-    if projects and "start_date" in projects[0] and projects[0]["start_date"] is not pd.NaT:
+    # Gantt chart using plotly.express.timeline
+    if projects and any(p.get("start_date") and p.get("end_date") for p in projects):
         gantt_data = []
         for p in projects:
-            if p["start_date"] and p["end_date"]:
+            if p["start_date"] and p["end_date"] and not pd.isna(p["start_date"]) and not pd.isna(p["end_date"]):
                 gantt_data.append(dict(
                     Task=p["ref"],
                     Start=p["start_date"],
                     Finish=p["end_date"],
-                    Resource=p["status"]
+                    Status=p["status"],
+                    Client=p["client"]
                 ))
         if gantt_data:
-            fig = ff.create_gantt(gantt_data, index_col='Task', show_colorbar=True, group_tasks=True, title="Project Gantt Chart")
+            df_gantt = pd.DataFrame(gantt_data)
+            fig = px.timeline(df_gantt, x_start="Start", x_end="Finish", y="Task",
+                              color="Status", hover_data=["Client"],
+                              title="Project Timeline")
+            fig.update_yaxes(categoryorder="total ascending")
             st.plotly_chart(fig, use_container_width=True)
         else:
-            st.warning("No projects have both start and end dates.")
+            st.warning("No projects have valid start and end dates.")
     else:
-        st.warning("Start and end dates are not available in the source data. Please add them to the Excel file.")
+        st.warning("Start and end dates are not available in the source data. Please add them to the Excel file (embedded in Client column).")
 
-    if projects and "end_date" in projects[0] and projects[0]["end_date"] is not pd.NaT:
+    if projects and any(p.get("end_date") for p in projects):
         today = pd.Timestamp.today()
-        upcoming = [p for p in projects if p["end_date"] >= today and p["status"] != "Complete"]
+        upcoming = [p for p in projects if p.get("end_date") and p["end_date"] >= today and p["status"] != "Complete"]
         if upcoming:
-            st.subheader("Upcoming Deadlines")
-            upcoming_df = pd.DataFrame(upcoming)
-            upcoming_df = upcoming_df[["ref", "client", "end_date", "status"]].sort_values("end_date")
-            upcoming_df["end_date"] = upcoming_df["end_date"].dt.strftime("%Y-%m-%d")
-            st.dataframe(upcoming_df, use_container_width=True)
+            with st.expander("Upcoming Deadlines", expanded=True):
+                upcoming_df = pd.DataFrame(upcoming)
+                upcoming_df = upcoming_df[["ref", "client", "end_date", "status"]].sort_values("end_date")
+                upcoming_df["end_date"] = upcoming_df["end_date"].dt.strftime("%Y-%m-%d")
+                st.dataframe(upcoming_df, use_container_width=True)
 
 # Optional: show last refresh time in sidebar
 if use_url:

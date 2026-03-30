@@ -2,5 +2,5 @@ pandas
 openpyxl
 streamlit
 plotly>=5.0.0
-altair
+altair>=4.0
 requests

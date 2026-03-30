@@ -10,37 +10,65 @@ import time
 # Configuration
 # -------------------------------
 SHEET_NAME = "LIVE PROJECTS"
-REFRESH_INTERVAL = 30  # seconds – not used for uploader, but kept for consistency
+REFRESH_INTERVAL = 30  # seconds for auto-refresh (only if using URL)
+
+# Try to get the Excel URL from Streamlit secrets
+try:
+    EXCEL_URL = st.secrets["EXCEL_URL"]
+    use_url = True
+except:
+    use_url = False
+    st.info("No Excel URL secret found. Falling back to manual file upload.")
 
 st.set_page_config(page_title="Project Dashboard", layout="wide")
 st.title("📊 Advanced Project Dashboard")
 
-# Sidebar for file upload
-st.sidebar.title("Data Upload")
-uploaded_file = st.sidebar.file_uploader(
-    "Upload LIVE PROJECTS.xlsx",
-    type=["xlsx"],
-    help="Upload the latest Excel file. The dashboard will use this file for all views."
-)
+# -------------------------------
+# Data loading function (cached)
+# -------------------------------
+@st.cache_data(ttl=REFRESH_INTERVAL if use_url else None)
+def load_data_from_url():
+    try:
+        return process_live_projects(EXCEL_URL, SHEET_NAME)
+    except Exception as e:
+        st.error(f"Error loading data from URL: {e}")
+        return None
 
-if not uploaded_file:
-    st.info("👈 Please upload your LIVE PROJECTS.xlsx file using the sidebar.")
-    st.stop()
+@st.cache_data
+def load_data_from_file(file_path):
+    try:
+        return process_live_projects(file_path, SHEET_NAME)
+    except Exception as e:
+        st.error(f"Error loading file: {e}")
+        return None
 
-# Save uploaded file to a temporary location
-with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
-    tmp.write(uploaded_file.getvalue())
-    tmp_path = tmp.name
-
-# Load data from the temporary file
-try:
-    data = process_live_projects(tmp_path, SHEET_NAME)
-except Exception as e:
-    st.error(f"Error processing file: {e}")
-    st.stop()
-finally:
-    # Clean up temporary file
-    os.unlink(tmp_path)
+# -------------------------------
+# Load data based on mode
+# -------------------------------
+if use_url:
+    # Auto-refresh mode: fetch from private URL
+    st.sidebar.success("Auto-refresh enabled – data is fetched from private URL every 30 seconds.")
+    data = load_data_from_url()
+    if data is None:
+        st.stop()
+else:
+    # Manual upload mode
+    uploaded_file = st.sidebar.file_uploader(
+        "Upload LIVE PROJECTS.xlsx",
+        type=["xlsx"],
+        help="Upload the latest Excel file. The dashboard will use this file for all views."
+    )
+    if not uploaded_file:
+        st.info("👈 Please upload your LIVE PROJECTS.xlsx file using the sidebar.")
+        st.stop()
+    # Save to temp file
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
+        tmp.write(uploaded_file.getvalue())
+        tmp_path = tmp.name
+    data = load_data_from_file(tmp_path)
+    os.unlink(tmp_path)  # clean up
+    if data is None:
+        st.stop()
 
 # Extract data
 projects = data["projects"]
@@ -48,7 +76,7 @@ person_stats = data["person_stats"]
 tasks = data["tasks"]
 kpis = data["kpis"]
 
-# Sidebar filters (optional)
+# Sidebar filters (common to both modes)
 st.sidebar.title("Filters")
 all_people = sorted({t["Lead"] for t in tasks if t["Lead"]} | {t["Support"] for t in tasks if t["Support"]})
 person_filter = st.sidebar.selectbox("Filter by person", ["All"] + all_people)
@@ -63,7 +91,7 @@ if show_only_pending:
     filtered_tasks = [t for t in filtered_tasks if not t["IsDone"]]
 
 # ----------------------------------------------------------------------
-# Helper styling functions (same as before)
+# Helper styling functions
 # ----------------------------------------------------------------------
 def status_color(status):
     return {
@@ -203,4 +231,9 @@ with tab5:
             upcoming_df["end_date"] = upcoming_df["end_date"].dt.strftime("%Y-%m-%d")
             st.dataframe(upcoming_df, use_container_width=True)
 
-st.sidebar.success("Dashboard ready! To update, upload a new file.")
+# Optional: show last refresh time in sidebar
+if use_url:
+    st.sidebar.caption(f"Auto-refresh every {REFRESH_INTERVAL} seconds")
+    if st.sidebar.button("Force refresh now"):
+        st.cache_data.clear()
+        st.rerun()

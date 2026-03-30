@@ -1,31 +1,70 @@
+import streamlit as st
 import pandas as pd
-import plotly.express as px
 import plotly.figure_factory as ff
 from dashboard_processor import process_live_projects
-import time
+import tempfile
 import os
+import time
 
 # -------------------------------
 # Configuration
 # -------------------------------
-EXCEL_PATH = "LIVE PROJECTS.xlsx"   # Adjust to your file path
 SHEET_NAME = "LIVE PROJECTS"
-REFRESH_INTERVAL = 30  # seconds (polling fallback)
+REFRESH_INTERVAL = 30  # seconds – not used for uploader, but kept for consistency
 
-# -------------------------------
-# Load data with caching (auto-refresh)
-# -------------------------------
-@st.cache_data(ttl=REFRESH_INTERVAL)
-def load_data():
-    try:
-        return process_live_projects(EXCEL_PATH, SHEET_NAME)
-    except Exception as e:
-        st.error(f"Error loading data: {e}")
-        return None
+st.set_page_config(page_title="Project Dashboard", layout="wide")
+st.title("📊 Advanced Project Dashboard")
 
-# -------------------------------
-# Helper functions for styling
-# -------------------------------
+# Sidebar for file upload
+st.sidebar.title("Data Upload")
+uploaded_file = st.sidebar.file_uploader(
+    "Upload LIVE PROJECTS.xlsx",
+    type=["xlsx"],
+    help="Upload the latest Excel file. The dashboard will use this file for all views."
+)
+
+if not uploaded_file:
+    st.info("👈 Please upload your LIVE PROJECTS.xlsx file using the sidebar.")
+    st.stop()
+
+# Save uploaded file to a temporary location
+with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
+    tmp.write(uploaded_file.getvalue())
+    tmp_path = tmp.name
+
+# Load data from the temporary file
+try:
+    data = process_live_projects(tmp_path, SHEET_NAME)
+except Exception as e:
+    st.error(f"Error processing file: {e}")
+    st.stop()
+finally:
+    # Clean up temporary file
+    os.unlink(tmp_path)
+
+# Extract data
+projects = data["projects"]
+person_stats = data["person_stats"]
+tasks = data["tasks"]
+kpis = data["kpis"]
+
+# Sidebar filters (optional)
+st.sidebar.title("Filters")
+all_people = sorted({t["Lead"] for t in tasks if t["Lead"]} | {t["Support"] for t in tasks if t["Support"]})
+person_filter = st.sidebar.selectbox("Filter by person", ["All"] + all_people)
+status_filter = st.sidebar.multiselect("Project status", ["Complete", "In Progress", "Blocked", "Not Started", "Admin"], default=["In Progress", "Blocked"])
+show_only_pending = st.sidebar.checkbox("Show only pending tasks")
+
+# Apply filters to tasks
+filtered_tasks = tasks.copy()
+if person_filter != "All":
+    filtered_tasks = [t for t in filtered_tasks if t["Lead"] == person_filter or t["Support"] == person_filter]
+if show_only_pending:
+    filtered_tasks = [t for t in filtered_tasks if not t["IsDone"]]
+
+# ----------------------------------------------------------------------
+# Helper styling functions (same as before)
+# ----------------------------------------------------------------------
 def status_color(status):
     return {
         "Complete": ("#DCFCE7", "#16A34A"),
@@ -57,47 +96,13 @@ def billing_status_color(status):
         return "#CCFBF1", "#0D9488"
     return None
 
-# -------------------------------
-# Main Dashboard
-# -------------------------------
-st.set_page_config(page_title="Project Dashboard", layout="wide")
-st.title("📊 Advanced Project Dashboard")
-st.caption(f"Auto-updates every {REFRESH_INTERVAL} seconds – Last refresh: {time.strftime('%H:%M:%S')}")
-
-# Sidebar filters
-st.sidebar.title("Filters")
-all_people = set()
-data = load_data()
-if data:
-    all_people = {t["Lead"] for t in data["tasks"] if t["Lead"]} | {t["Support"] for t in data["tasks"] if t["Support"]}
-    all_people = sorted([p for p in all_people if p])
-person_filter = st.sidebar.selectbox("Filter by person", ["All"] + all_people)
-status_filter = st.sidebar.multiselect("Project status", ["Complete", "In Progress", "Blocked", "Not Started", "Admin"], default=["In Progress", "Blocked"])
-show_only_pending = st.sidebar.checkbox("Show only pending tasks")
-
-# Reload data after filters (cached)
-if data is None:
-    st.stop()
-
-projects = data["projects"]
-person_stats = data["person_stats"]
-tasks = data["tasks"]
-kpis = data["kpis"]
-df_raw = data["dataframe"]
-
-# Apply person filter to tasks
-filtered_tasks = tasks.copy()
-if person_filter != "All":
-    filtered_tasks = [t for t in filtered_tasks if t["Lead"] == person_filter or t["Support"] == person_filter]
-if show_only_pending:
-    filtered_tasks = [t for t in filtered_tasks if not t["IsDone"]]
-
+# ----------------------------------------------------------------------
 # Tabs
+# ----------------------------------------------------------------------
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["📈 Overview", "📋 Projects", "👥 Tasks by Person", "💰 Billing", "📅 Timeline"])
 
 # -------------------- TAB 1: OVERVIEW --------------------
 with tab1:
-    # KPI cards
     st.header("Key Metrics")
     col1, col2, col3, col4 = st.columns(4)
     with col1:
@@ -113,7 +118,6 @@ with tab1:
         st.metric("Not Invoiced", kpis["not_invoiced_tasks"])
         st.metric("Likely Paid", kpis["likely_paid_tasks"])
 
-    # Team availability
     st.subheader("Team Availability")
     if person_stats:
         team_df = pd.DataFrame(person_stats)
@@ -128,9 +132,7 @@ with tab2:
     st.header("All Projects")
     if projects:
         df_projects = pd.DataFrame(projects)
-        # Apply status filter
         df_projects = df_projects[df_projects["status"].isin(status_filter)]
-        # Format dates
         if "start_date" in df_projects.columns:
             df_projects["start_date"] = df_projects["start_date"].dt.strftime("%Y-%m-%d")
         if "end_date" in df_projects.columns:
@@ -143,10 +145,9 @@ with tab3:
     if person_filter != "All":
         st.subheader(f"Tasks for **{person_filter}**")
     if filtered_tasks:
-        df_filtered_tasks = pd.DataFrame(filtered_tasks)
-        # Select columns to display
+        df_tasks = pd.DataFrame(filtered_tasks)
         cols = ["ref", "client", "task", "Lead", "Support", "IsDone", "SmartStatus", "IsStuck", "Comments"]
-        df_display = df_filtered_tasks[cols].copy()
+        df_display = df_tasks[cols].copy()
         df_display["IsDone"] = df_display["IsDone"].apply(lambda x: "✓ YES" if x else "NO")
         st.dataframe(df_display, use_container_width=True)
     else:
@@ -155,7 +156,6 @@ with tab3:
 # -------------------- TAB 4: BILLING --------------------
 with tab4:
     st.header("Billing Intelligence")
-    # Clients with unpaid tasks
     unpaid_projects = [p for p in projects if p["not_invoiced"] > 0 or p["awaiting_pay_count"] > 0 or p["likely_paid_count"] > 0]
     if unpaid_projects:
         st.subheader("Clients with unpaid or pending billing")
@@ -165,7 +165,6 @@ with tab4:
     else:
         st.success("All clients are fully paid and invoiced.")
 
-    # Detailed task billing actions
     bill_tasks = [t for t in tasks if (t["IsDone"] and not t["HasInvoice"] and not t["LikelyPaid"]) or t["AwaitingPayment"] or t["LikelyPaid"]]
     if bill_tasks:
         st.subheader("Tasks requiring billing action")
@@ -176,7 +175,6 @@ with tab4:
 # -------------------- TAB 5: TIMELINE --------------------
 with tab5:
     st.header("Project Timeline")
-    # Gantt chart if dates available
     if projects and "start_date" in projects[0] and projects[0]["start_date"] is not pd.NaT:
         gantt_data = []
         for p in projects:
@@ -195,7 +193,6 @@ with tab5:
     else:
         st.warning("Start and end dates are not available in the source data. Please add them to the Excel file.")
 
-    # Upcoming deadlines
     if projects and "end_date" in projects[0] and projects[0]["end_date"] is not pd.NaT:
         today = pd.Timestamp.today()
         upcoming = [p for p in projects if p["end_date"] >= today and p["status"] != "Complete"]
@@ -206,9 +203,4 @@ with tab5:
             upcoming_df["end_date"] = upcoming_df["end_date"].dt.strftime("%Y-%m-%d")
             st.dataframe(upcoming_df, use_container_width=True)
 
-# Manual refresh button
-st.sidebar.title("Refresh")
-if st.sidebar.button("Force refresh now"):
-    st.cache_data.clear()
-    st.rerun()
-st.sidebar.info(f"Auto-refresh every {REFRESH_INTERVAL} seconds.")
+st.sidebar.success("Dashboard ready! To update, upload a new file.")
